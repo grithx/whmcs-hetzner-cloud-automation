@@ -1,0 +1,52 @@
+name: Security and syntax checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - final-security-hardening
+
+permissions:
+  contents: read
+
+jobs:
+  php-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['7.4', '8.2']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          coverage: none
+
+      - name: Lint PHP files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find modules/servers/hetznercloud -type f -name '*.php' -print0 \
+            | xargs -0 -n1 php -l
+
+  javascript-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check modules/servers/hetznercloud/templates/script.js
+          node --check modules/servers/hetznercloud/templates/security.js
