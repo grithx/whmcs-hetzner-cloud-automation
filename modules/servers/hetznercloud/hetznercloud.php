@@ -56,27 +56,20 @@ function hetznercloud_MetaData()
 }
 
 /**
- * Server Configuration Fields
+ * Product Configuration Options
+ *
+ * WHMCS calls ConfigOptions without a service/server context, so the selected
+ * server Access Hash is not available here. The server type is kept as a
+ * per-product value and used later by normal provisioning calls.
  */
-function hetznercloud_ConfigOptions($params)
+function hetznercloud_ConfigOptions()
 {
-    $serverTypes = hetznercloud_GetServerTypes($params);
-
-    if (!$serverTypes) {
-        return [
-            'Server Type' => [
-                'Type' => 'text',
-                'Default' => 'cx11',
-                'Description' => 'Error fetching server types. Check API credentials.',
-            ],
-        ];
-    }
-
     return [
         'Server Type' => [
-            'Type' => 'dropdown',
-            'Options' => implode(',', $serverTypes),
-            'Description' => 'Choose the Hetzner server type',
+            'Type' => 'text',
+            'Size' => '30',
+            'Default' => '',
+            'Description' => 'Enter the Hetzner Cloud server type name for this product.',
         ],
     ];
 }
