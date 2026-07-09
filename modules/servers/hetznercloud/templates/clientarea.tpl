@@ -33,10 +33,7 @@
         {/if}
 
         <div class="card status-card">
-            <div class="card-header">
-                <i class="fas fa-server"></i>
-                <h3>Server Status</h3>
-            </div>
+            <div class="card-header"><i class="fas fa-server"></i><h3>Server Status</h3></div>
             <div class="server-info">
                 <div class="info-item"><i class="fas fa-network-wired"></i><span><strong>IP:</strong> {$ip|escape:'html'}</span></div>
                 <div class="info-item"><i class="fas fa-hdd"></i><span><strong>OS:</strong> {$image|escape:'html'}</span></div>
@@ -45,9 +42,7 @@
                     <div class="info-item">
                         <i class="fas fa-compact-disc"></i>
                         <span><strong>ISO:</strong> {$attachedISO.description|escape:'html'}</span>
-                        <button class="btn btn-sm btn-outline-danger unmount-iso-btn" onclick="unmountISO()" title="Unmount ISO">
-                            <i class="fas fa-eject"></i> Unmount
-                        </button>
+                        <button class="btn btn-sm btn-outline-danger unmount-iso-btn" onclick="unmountISO()" title="Unmount ISO"><i class="fas fa-eject"></i> Unmount</button>
                     </div>
                 {/if}
                 <div class="status-indicator">
@@ -175,7 +170,7 @@
 </div>
 
 <div id="serviceId" data-id="{$serviceid|escape:'html'}" style="display:none;"></div>
-<div id="consoleLink" data-url="{$consoleLink|escape:'html'}" style="display:none;"></div>
+<div id="consoleLink" data-url="" style="display:none;"></div>
 <form id="serviceForm" action="" method="POST" style="display:none;"><input type="hidden" name="hetznercloud_csrf_token" value="{$csrfToken|escape:'html'}"></form>
 <div id="metricsUrl" data-url="" style="display:none;"></div>
 <div id="statusUrl" data-url="" style="display:none;"></div>
@@ -183,8 +178,8 @@
 <script>
 window.hetznerCloudCsrfToken = {$csrfToken|json_encode nofilter};
 </script>
-<script src="modules/servers/hetznercloud/templates/security.js"></script>
 <script src="modules/servers/hetznercloud/templates/script.js"></script>
+<script src="modules/servers/hetznercloud/templates/security.js"></script>
 
 <div class="copyright-notice"><div class="container"><p>&copy; 2025 WHMCS Hetzner Cloud Module v{$version|escape:'html'}</p></div></div>
 </body>
