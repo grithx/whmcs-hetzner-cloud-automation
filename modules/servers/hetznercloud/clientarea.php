@@ -20,7 +20,6 @@ function hetznercloud_ClientAreaOutput($params)
 
     logActivity("Hetzner Cloud - Client Area accessed for service ID: " . $serviceId);
 
-    // Handle AJAX request for status update.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
         header('Content-Type: application/json; charset=utf-8');
         $statusInfo = hetznercloud_GetServerStatus($params);
@@ -33,7 +32,6 @@ function hetznercloud_ClientAreaOutput($params)
         exit;
     }
 
-    // Handle AJAX request for metrics.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'metrics') {
         header('Content-Type: application/json; charset=utf-8');
 
@@ -45,7 +43,6 @@ function hetznercloud_ClientAreaOutput($params)
             $start = $end - 3600;
         }
 
-        // Bound metrics queries to 31 days to avoid abusive requests.
         $maxRange = 31 * 24 * 60 * 60;
         if (($end - $start) > $maxRange) {
             $start = $end - $maxRange;
@@ -65,7 +62,6 @@ function hetznercloud_ClientAreaOutput($params)
         exit;
     }
 
-    // Handle AJAX request for ISOs.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'isos') {
         header('Content-Type: application/json; charset=utf-8');
         $isos = hetznercloud_GetAvailableISOs($params);
@@ -76,7 +72,47 @@ function hetznercloud_ClientAreaOutput($params)
         exit;
     }
 
-    // Cache refresh is state-changing and must be POST + CSRF protected.
+    // Generate a console session only when the authenticated service owner clicks Web Console.
+    if (isset($_POST['ajax']) && $_POST['ajax'] === 'console_grant') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+
+        if (!hetznercloud_ValidateCsrfToken($_POST['hetznercloud_csrf_token'] ?? '')) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'message' => 'Invalid request token']);
+            exit;
+        }
+
+        $serverID = $params['customfields']['serverID'] ?? null;
+        if (!hetznercloud_ValidateServerID($serverID)) {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'message' => 'Server ID is missing or invalid']);
+            exit;
+        }
+
+        $consoleResponse = hetznercloud_API_Request('POST', 'request_console', $params, $serverID);
+        $consoleData = $consoleResponse['data'] ?? null;
+
+        if (empty($consoleResponse['success']) || !is_array($consoleData)) {
+            http_response_code(502);
+            echo json_encode(['success' => false, 'message' => 'Unable to create console session']);
+            exit;
+        }
+
+        $grantToken = hetznercloud_CreateConsoleGrant($params, $consoleData);
+        if (!$grantToken) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'Unable to create console grant']);
+            exit;
+        }
+
+        echo json_encode([
+            'success' => true,
+            'url' => '../modules/servers/hetznercloud/console.php?token=' . rawurlencode($grantToken),
+        ]);
+        exit;
+    }
+
     if (isset($_POST['ajax']) && $_POST['ajax'] === 'refresh_isos') {
         header('Content-Type: application/json; charset=utf-8');
 
@@ -95,7 +131,6 @@ function hetznercloud_ClientAreaOutput($params)
         exit;
     }
 
-    // Handle ISO attachment.
     if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'AttachISO') {
         $isoName = trim((string) ($_POST['iso_name'] ?? ''));
 
@@ -110,15 +145,10 @@ function hetznercloud_ClientAreaOutput($params)
         }
 
         $result = hetznercloud_AttachISO($params, $isoName);
-        if ($result['success']) {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=iso_attached');
-        } else {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=iso_failed');
-        }
+        header('Location: clientarea.php?action=productdetails&id=' . $serviceId . ($result['success'] ? '&success=iso_attached' : '&error=iso_failed'));
         exit;
     }
 
-    // Handle server rebuild.
     if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'RebuildOS') {
         $newImage = trim((string) ($_POST['new_image'] ?? ''));
 
@@ -133,23 +163,13 @@ function hetznercloud_ClientAreaOutput($params)
         }
 
         $result = hetznercloud_RebuildServer($params, $newImage);
-        if ($result['success']) {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=rebuild_initiated');
-        } else {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=rebuild_failed');
-        }
+        header('Location: clientarea.php?action=productdetails&id=' . $serviceId . ($result['success'] ? '&success=rebuild_initiated' : '&error=rebuild_failed'));
         exit;
     }
 
-    // Handle ISO unmount.
     if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'UnmountISO') {
         $result = hetznercloud_UnmountISO($params);
-
-        if ($result['success']) {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=iso_unmounted');
-        } else {
-            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=unmount_failed');
-        }
+        header('Location: clientarea.php?action=productdetails&id=' . $serviceId . ($result['success'] ? '&success=iso_unmounted' : '&error=unmount_failed'));
         exit;
     }
 
@@ -158,30 +178,6 @@ function hetznercloud_ClientAreaOutput($params)
         $serverInfo = hetznercloud_GetServerDetails($params);
         $availableImages = hetznercloud_GetAvailableImages($params);
         $attachedISO = hetznercloud_GetAttachedISO($params);
-
-        // Create console authorization grant without putting console credentials in the URL.
-        $consoleLinkData = [
-            'link' => '',
-            'text' => 'Web Console (Unavailable)',
-            'error' => '',
-        ];
-
-        $serverID = $params['customfields']['serverID'] ?? null;
-        if ($serverID) {
-            $consoleResponse = hetznercloud_API_Request('POST', 'request_console', $params, $serverID);
-            $consoleData = $consoleResponse['data'] ?? null;
-
-            if ($consoleResponse['success'] && is_array($consoleData)) {
-                $grantToken = hetznercloud_CreateConsoleGrant($params, $consoleData);
-                if ($grantToken) {
-                    $consoleLinkData = [
-                        'link' => '../modules/servers/hetznercloud/console.php?token=' . rawurlencode($grantToken),
-                        'text' => 'Web Console',
-                        'error' => '',
-                    ];
-                }
-            }
-        }
 
         if (isset($serverInfo['error'])) {
             $name = 'Unknown';
@@ -198,7 +194,6 @@ function hetznercloud_ClientAreaOutput($params)
         $name = 'Error';
         $ip = 'Error';
         $image = 'Error';
-        $consoleLinkData = ['link' => '', 'text' => 'Console Unavailable', 'error' => 'Error loading data'];
         $availableImages = [];
         $attachedISO = ['success' => true, 'iso' => null];
     }
@@ -214,9 +209,9 @@ function hetznercloud_ClientAreaOutput($params)
             'serverStatus' => $statusInfo['status'] ?? 'Unknown',
             'statusColor' => $statusInfo['color'] ?? 'grey',
             'statusMessage' => $statusInfo['message'] ?? 'No status available',
-            'consoleLink' => $consoleLinkData['link'] ?? '',
-            'consoleText' => $consoleLinkData['text'] ?? 'Web Console (Unavailable)',
-            'consoleError' => $consoleLinkData['error'] ?? '',
+            'consoleLink' => '',
+            'consoleText' => 'Web Console',
+            'consoleError' => '',
             'availableImages' => $availableImages,
             'attachedISO' => !empty($attachedISO['success']) ? ($attachedISO['iso'] ?? null) : null,
             'username' => $params['username'] ?? 'root',
