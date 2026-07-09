@@ -5,103 +5,119 @@ if (!defined("WHMCS")) {
 }
 
 /**
- * Optimized API Request to Hetzner Cloud
- * Consolidated endpoints and improved error handling
+ * Send a request to the Hetzner Cloud API.
  */
 function hetznercloud_API_Request($method, $endpoint, $params, $serverID = null, $postData = [])
 {
-    $apiToken = $params['serveraccesshash'] ?? hetznercloud_GetAPIToken();
-    
+    $apiToken = null;
+
+    // For service operations, WHMCS supplies the access hash of the selected server.
+    if (is_array($params) && !empty($params['serveraccesshash'])) {
+        $apiToken = (string) $params['serveraccesshash'];
+    }
+
+    // ConfigOptions is the only provisioning module function without service context.
+    // Keep a limited fallback for server type discovery only.
+    if (!$apiToken && $endpoint === 'server_types') {
+        $apiToken = hetznercloud_GetAPITokenForConfiguration();
+    }
+
     if (!$apiToken) {
-        logActivity("Hetzner Cloud - API Request: No API token available");
+        logActivity("Hetzner Cloud - API request rejected: no service-bound API token available");
         return ['success' => false, 'message' => 'API token not configured'];
     }
 
-    // Build optimized URL based on endpoint type
     $url = hetznercloud_BuildAPIUrl($endpoint, $serverID, $method, $postData);
-    
     if (!$url) {
         return ['success' => false, 'message' => 'Invalid endpoint or missing server ID'];
     }
 
-    // Execute API request
     return hetznercloud_ExecuteRequest($url, $method, $apiToken, $postData, $endpoint, $serverID);
 }
 
 /**
- * Build API URL based on endpoint type
+ * Build an allow-listed Hetzner API URL.
  */
 function hetznercloud_BuildAPIUrl($endpoint, $serverID, $method, $postData)
 {
-    $baseUrl = "https://api.hetzner.cloud/v1";
-    
-    // Direct resource endpoints
+    $baseUrl = 'https://api.hetzner.cloud/v1';
+
     $directEndpoints = [
         'create_server' => '/servers',
         'server_types' => '/server_types',
         'images' => '/images',
-        'isos' => '/isos'
+        'isos' => '/isos',
     ];
-    
+
     if (isset($directEndpoints[$endpoint])) {
         return $baseUrl . $directEndpoints[$endpoint];
     }
-    
-    // Server-specific endpoints
-    if ($serverID) {
-        // Metrics endpoint
+
+    if ($serverID !== null && $serverID !== '') {
+        if (!hetznercloud_ValidateServerID($serverID)) {
+            return false;
+        }
+
+        $serverID = (int) $serverID;
+
         if ($endpoint === 'metrics') {
-            $url = "{$baseUrl}/servers/{$serverID}/metrics";
-            return !empty($postData) ? $url . '?' . http_build_query($postData) : $url;
+            $url = $baseUrl . '/servers/' . $serverID . '/metrics';
+            return !empty($postData) ? $url . '?' . http_build_query($postData, '', '&', PHP_QUERY_RFC3986) : $url;
         }
-        
-        // Server details
+
         if ($endpoint === 'server_details') {
-            return "{$baseUrl}/servers/{$serverID}";
+            return $baseUrl . '/servers/' . $serverID;
         }
-        
-        // Server actions
-        if (in_array($endpoint, ['poweron', 'poweroff', 'reboot', 'reset', 'shutdown'])) {
-            return "{$baseUrl}/servers/{$serverID}/actions/{$endpoint}";
+
+        $allowedActions = [
+            'poweron',
+            'poweroff',
+            'reboot',
+            'reset',
+            'shutdown',
+            'attach_iso',
+            'detach_iso',
+            'rebuild',
+            'reset_password',
+            'request_console',
+        ];
+
+        if (in_array($endpoint, $allowedActions, true)) {
+            return $baseUrl . '/servers/' . $serverID . '/actions/' . $endpoint;
         }
-        
-        // ISO actions
-        if (in_array($endpoint, ['attach_iso', 'detach_iso'])) {
-            return "{$baseUrl}/servers/{$serverID}/actions/{$endpoint}";
+
+        if (strtoupper($method) === 'DELETE' && $endpoint === 'servers') {
+            return $baseUrl . '/servers/' . $serverID;
         }
-        
-        // Rebuild action
-        if ($endpoint === 'rebuild') {
-            return "{$baseUrl}/servers/{$serverID}/actions/rebuild";
-        }
-        
-        // Delete server
-        if ($method === 'DELETE') {
-            return "{$baseUrl}/servers/{$serverID}";
-        }
-        
-        // Generic server actions
-        return "{$baseUrl}/servers/{$serverID}/actions/{$endpoint}";
+
+        return false;
     }
-    
-    // Metrics endpoint without server ID (for bulk operations)
-    if (strpos($endpoint, 'servers/') === 0) {
-        $url = "{$baseUrl}/{$endpoint}";
-        return ($method === 'GET' && !empty($postData)) ? $url . '?' . http_build_query($postData) : $url;
+
+    // Metrics helper calls use servers/{numeric-id}/metrics.
+    if (preg_match('#^servers/([1-9][0-9]*)/metrics$#', (string) $endpoint, $matches)) {
+        $url = $baseUrl . '/servers/' . (int) $matches[1] . '/metrics';
+        return strtoupper($method) === 'GET' && !empty($postData)
+            ? $url . '?' . http_build_query($postData, '', '&', PHP_QUERY_RFC3986)
+            : $url;
     }
-    
+
+    // Server details helper call used by the attached ISO lookup.
+    if (preg_match('#^servers/([1-9][0-9]*)$#', (string) $endpoint, $matches)) {
+        return $baseUrl . '/servers/' . (int) $matches[1];
+    }
+
     return false;
 }
 
 /**
- * Execute the actual API request
+ * Execute the HTTPS request and record a WHMCS module log entry with secrets scrubbed.
  */
 function hetznercloud_ExecuteRequest($url, $method, $apiToken, $postData, $endpoint, $serverID)
 {
     $headers = [
-        "Authorization: Bearer {$apiToken}",
-        "Content-Type: application/json",
-        "User-Agent: WHMCS-HetznerCloud-Module/2.0"
+        'Authorization: Bearer ' . $apiToken,
+        'Content-Type: application/json',
+        'User-Agent: WHMCS-HetznerCloud-Module/2.0',
     ];
 
     $ch = curl_init();
@@ -114,100 +130,93 @@ function hetznercloud_ExecuteRequest($url, $method, $apiToken, $postData, $endpo
         CURLOPT_CONNECTTIMEOUT => 30,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS => 3
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
     ]);
 
-    // Handle POST data
-    if ($method === 'POST' && !empty($postData)) {
+    if (strtoupper($method) === 'POST' && !empty($postData)) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($postData));
     }
 
     $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curlError = curl_error($ch);
     curl_close($ch);
 
-    // Log request for debugging
-    hetznercloud_LogAPIRequest($method, $endpoint, $serverID, $httpCode, $url, $postData);
+    $result = is_string($response) ? json_decode($response, true) : null;
 
-    // Handle cURL errors
-    if ($curlError) {
-        logActivity("Hetzner Cloud - API Error: cURL Error: {$curlError}");
-        return ['success' => false, 'message' => 'Connection error: ' . $curlError];
+    $replaceVars = [$apiToken];
+    if (is_array($result) && !empty($result['root_password'])) {
+        $replaceVars[] = (string) $result['root_password'];
+    }
+    if (is_array($result) && !empty($result['password'])) {
+        $replaceVars[] = (string) $result['password'];
     }
 
-    // Parse response
-    $result = json_decode($response, true);
-    
-    // Handle successful responses
+    // WHMCS documents logModuleCall for module request/response debugging and
+    // recommends replaceVars for secrets such as passwords and credentials.
+    logModuleCall(
+        'hetznercloud',
+        (string) $endpoint,
+        [
+            'method' => strtoupper($method),
+            'serverID' => $serverID ? (int) $serverID : null,
+            'payload' => $postData,
+        ],
+        is_string($response) ? $response : '',
+        $result,
+        array_values(array_filter($replaceVars, 'strlen'))
+    );
+
+    if ($curlError) {
+        logActivity("Hetzner Cloud - API connection error for endpoint: " . $endpoint);
+        return ['success' => false, 'message' => 'Connection error'];
+    }
+
     if ($httpCode >= 200 && $httpCode < 300) {
-        logActivity("Hetzner Cloud - API Success: {$method} {$endpoint} - HTTP {$httpCode}");
         return [
             'success' => true,
-            'message' => ucfirst($endpoint) . ' command sent successfully!',
-            'data' => $result
+            'message' => ucfirst((string) $endpoint) . ' command sent successfully!',
+            'data' => is_array($result) ? $result : [],
         ];
     }
-    
-    // Handle error responses
-    $errorMessage = $result['error']['message'] ?? "HTTP {$httpCode}";
-    logActivity("Hetzner Cloud - API Error: {$method} {$endpoint} - {$errorMessage}");
-    
+
+    $errorMessage = is_array($result) ? ($result['error']['message'] ?? ('HTTP ' . $httpCode)) : ('HTTP ' . $httpCode);
+    logActivity("Hetzner Cloud - API request failed for endpoint: " . $endpoint . " (HTTP " . $httpCode . ")");
+
     return [
         'success' => false,
-        'message' => $errorMessage
+        'message' => $errorMessage,
     ];
 }
 
 /**
- * Log API request details
+ * Get server types with 24-hour caching.
  */
-function hetznercloud_LogAPIRequest($method, $endpoint, $serverID, $httpCode, $url, $postData)
-{
-    $logMessage = "Hetzner Cloud - API Request: {$method} {$endpoint}";
-    if ($serverID) $logMessage .= " (Server ID: {$serverID})";
-    $logMessage .= " - HTTP {$httpCode}";
-    
-    // Only log detailed debug info in development
-    if (defined('WHMCS_DEBUG') && WHMCS_DEBUG) {
-        logActivity("Hetzner Cloud - API Debug: URL: {$url}, Method: {$method}, PostData: " . json_encode($postData));
-    }
-    
-    logActivity($logMessage);
-}
-
-/**
- * Get server types with optimized caching
- */
-function hetznercloud_GetServerTypes()
+function hetznercloud_GetServerTypes($params = [])
 {
     $cacheFile = __DIR__ . '/cache/server_types_cache.json';
-    $cacheTime = 86400; // 24 hours
+    $cacheTime = 86400;
 
-    // Ensure cache directory exists
     if (!is_dir(dirname($cacheFile))) {
-        mkdir(dirname($cacheFile), 0755, true);
+        mkdir(dirname($cacheFile), 0750, true);
     }
 
-    // Check cache validity
     if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < $cacheTime) {
         $cachedData = json_decode(file_get_contents($cacheFile), true);
-        if (!empty($cachedData)) {
+        if (!empty($cachedData) && is_array($cachedData)) {
             return $cachedData;
         }
     }
 
-    // Fetch from API
-    $response = hetznercloud_API_Request('GET', 'server_types', '', '', '');
+    $response = hetznercloud_API_Request('GET', 'server_types', $params, null, []);
 
-    if ($response['success'] && isset($response['data']['server_types'])) {
-        $serverTypes = array_map(function($type) { 
-            return $type['name']; 
+    if (!empty($response['success']) && isset($response['data']['server_types'])) {
+        $serverTypes = array_map(function ($type) {
+            return $type['name'];
         }, $response['data']['server_types']);
 
-        // Cache results
-        file_put_contents($cacheFile, json_encode($serverTypes));
+        file_put_contents($cacheFile, json_encode($serverTypes), LOCK_EX);
         return $serverTypes;
     }
 
@@ -215,52 +224,47 @@ function hetznercloud_GetServerTypes()
 }
 
 /**
- * Get API token from WHMCS server settings
+ * ConfigOptions has no service context. Use a token only for read-only server type discovery.
+ */
+function hetznercloud_GetAPITokenForConfiguration()
+{
+    $result = select_query('tblservers', 'accesshash', ['type' => 'hetznercloud', 'disabled' => 0]);
+    $data = mysql_fetch_array($result);
+    return !empty($data['accesshash']) ? (string) $data['accesshash'] : null;
+}
+
+/**
+ * Backward-compatible alias retained for existing integrations.
  */
 function hetznercloud_GetAPIToken()
 {
-    $result = select_query('tblservers', 'accesshash', ['type' => 'hetznercloud']);
-    $data = mysql_fetch_array($result);
-    return $data['accesshash'] ?? null;
+    return hetznercloud_GetAPITokenForConfiguration();
 }
 
-/**
- * Validate server ID format
- */
 function hetznercloud_ValidateServerID($serverID)
 {
-    return is_numeric($serverID) && $serverID > 0;
+    return filter_var($serverID, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]) !== false;
 }
 
-/**
- * Get cached data with automatic refresh
- */
 function hetznercloud_GetCachedData($cacheKey, $callback, $ttl = 3600)
 {
-    $cacheFile = __DIR__ . '/cache/' . md5($cacheKey) . '.json';
-    
-    // Ensure cache directory exists
+    $cacheFile = __DIR__ . '/cache/' . md5((string) $cacheKey) . '.json';
+
     if (!is_dir(dirname($cacheFile))) {
-        mkdir(dirname($cacheFile), 0755, true);
+        mkdir(dirname($cacheFile), 0750, true);
     }
-    
-    // Check cache validity
-    if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < $ttl) {
+
+    if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < (int) $ttl) {
         $cachedData = json_decode(file_get_contents($cacheFile), true);
         if (!empty($cachedData)) {
             return $cachedData;
         }
     }
-    
-    // Fetch fresh data
+
     $data = $callback();
-    
-    // Cache results
     if (!empty($data)) {
-        file_put_contents($cacheFile, json_encode($data));
+        file_put_contents($cacheFile, json_encode($data), LOCK_EX);
     }
-    
+
     return $data;
 }
-
-
