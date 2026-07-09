@@ -6,44 +6,51 @@ if (!defined("WHMCS")) {
 
 require_once __DIR__ . '/version.php';
 require_once __DIR__ . '/api.php';
+require_once __DIR__ . '/security.php';
 
 /**
  * Client Area Output
  */
 function hetznercloud_ClientAreaOutput($params)
 {
-    // Log the client area access
-    logActivity("Hetzner Cloud - Client Area accessed for service ID: " . $params['serviceid']);
-    
-    // Handle AJAX request for status update
+    hetznercloud_AssertServiceOwnership($params);
+
+    $serviceId = (int) ($params['serviceid'] ?? 0);
+    $csrfToken = hetznercloud_GetCsrfToken();
+
+    logActivity("Hetzner Cloud - Client Area accessed for service ID: " . $serviceId);
+
+    // Handle AJAX request for status update.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
-        logActivity("Hetzner Cloud - Status AJAX request for service ID: " . $params['serviceid']);
+        header('Content-Type: application/json; charset=utf-8');
         $statusInfo = hetznercloud_GetServerStatus($params);
         echo json_encode([
-            'success'       => true,
-            'serverStatus'  => $statusInfo['status'] ?? 'Unknown',
-            'statusColor'   => $statusInfo['color'] ?? 'grey',
+            'success' => true,
+            'serverStatus' => $statusInfo['status'] ?? 'Unknown',
+            'statusColor' => $statusInfo['color'] ?? 'grey',
             'statusMessage' => $statusInfo['message'] ?? 'No status available',
         ]);
-        exit; // Stop further execution
+        exit;
     }
 
-    // Handle AJAX request for metrics
+    // Handle AJAX request for metrics.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'metrics') {
-        logActivity("Hetzner Cloud - Metrics AJAX request for service ID: " . $params['serviceid']);
-        
-        // Get start and end parameters for metrics
-        $start = isset($_GET['start']) ? (int)$_GET['start'] : null;
-        $end = isset($_GET['end']) ? (int)$_GET['end'] : null;
-        
-        // If no dates provided, use default (last hour)
-        if (!$start || !$end) {
+        header('Content-Type: application/json; charset=utf-8');
+
+        $start = isset($_GET['start']) ? (int) $_GET['start'] : null;
+        $end = isset($_GET['end']) ? (int) $_GET['end'] : null;
+
+        if (!$start || !$end || $start <= 0 || $end <= 0 || $start > $end) {
             $end = time();
-            $start = $end - (60 * 60); // 1 hour ago
+            $start = $end - 3600;
         }
-        
-        logActivity("Hetzner Cloud - Metrics time range: " . date('Y-m-d H:i:s', $start) . " to " . date('Y-m-d H:i:s', $end));
-        
+
+        // Bound metrics queries to 31 days to avoid abusive requests.
+        $maxRange = 31 * 24 * 60 * 60;
+        if (($end - $start) > $maxRange) {
+            $start = $end - $maxRange;
+        }
+
         $metrics = hetznercloud_GetServerMetrics($params, $start, $end);
         echo json_encode([
             'success' => true,
@@ -52,130 +59,131 @@ function hetznercloud_ClientAreaOutput($params)
                 'start' => $start,
                 'end' => $end,
                 'startFormatted' => date('Y-m-d H:i:s', $start),
-                'endFormatted' => date('Y-m-d H:i:s', $end)
-            ]
+                'endFormatted' => date('Y-m-d H:i:s', $end),
+            ],
         ]);
         exit;
     }
 
-    // Handle AJAX request for ISOs
+    // Handle AJAX request for ISOs.
     if (isset($_GET['ajax']) && $_GET['ajax'] === 'isos') {
-        logActivity("Hetzner Cloud - ISOs AJAX request for service ID: " . $params['serviceid']);
-        
-        // Log the parameters being passed
-        logActivity("Hetzner Cloud - ISOs request params: " . json_encode($params));
-        
+        header('Content-Type: application/json; charset=utf-8');
         $isos = hetznercloud_GetAvailableISOs($params);
-        
-        logActivity("Hetzner Cloud - ISOs response: " . json_encode($isos));
-        
         echo json_encode([
             'success' => true,
-            'isos' => $isos
+            'isos' => $isos,
         ]);
         exit;
     }
 
-    // Handle ISO cache refresh
-    if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_isos') {
-        logActivity("Hetzner Cloud - Refresh ISOs cache request for service ID: " . $params['serviceid']);
-        
+    // Cache refresh is state-changing and must be POST + CSRF protected.
+    if (isset($_POST['ajax']) && $_POST['ajax'] === 'refresh_isos') {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if (!hetznercloud_ValidateCsrfToken($_POST['hetznercloud_csrf_token'] ?? '')) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'message' => 'Invalid request token']);
+            exit;
+        }
+
         $isos = hetznercloud_RefreshISOCache($params);
         echo json_encode([
             'success' => true,
             'isos' => $isos,
-            'message' => 'ISO cache refreshed successfully'
+            'message' => 'ISO cache refreshed successfully',
         ]);
         exit;
     }
 
-    // Handle ISO attachment
-    if (isset($_POST['modop']) && $_POST['modop'] === 'custom' && isset($_POST['a']) && $_POST['a'] === 'AttachISO') {
-        $isoName = $_POST['iso_name'] ?? '';
-        
-        // Log all POST data for debugging
-        logActivity("Hetzner Cloud - AttachISO: POST data received: " . json_encode($_POST));
-        logActivity("Hetzner Cloud - AttachISO: ISO name extracted: '{$isoName}'");
-        logActivity("Hetzner Cloud - AttachISO: Service ID: " . $params['serviceid']);
-        logActivity("Hetzner Cloud - AttachISO: Server ID: " . ($params['customfields']['serverID'] ?? 'NOT_FOUND'));
-        
-        if (empty($isoName)) {
-            logActivity("Hetzner Cloud - AttachISO: No ISO name provided for service ID: " . $params['serviceid']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&error=no_iso');
+    // Handle ISO attachment.
+    if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'AttachISO') {
+        $isoName = trim((string) ($_POST['iso_name'] ?? ''));
+
+        if ($isoName === '') {
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=no_iso');
             exit;
         }
-        
+
+        if (strlen($isoName) > 255 || preg_match('/[\x00-\x1F\x7F]/', $isoName)) {
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=iso_failed');
+            exit;
+        }
+
         $result = hetznercloud_AttachISO($params, $isoName);
-        
         if ($result['success']) {
-            logActivity("Hetzner Cloud - AttachISO: Success for service ID: " . $params['serviceid']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&success=iso_attached');
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=iso_attached');
         } else {
-            logActivity("Hetzner Cloud - AttachISO: Failed for service ID: " . $params['serviceid'] . ". Error: " . $result['message']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&error=iso_failed&message=' . urlencode($result['message']));
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=iso_failed');
         }
         exit;
     }
 
-    // Handle server rebuild
-    if (isset($_POST['modop']) && $_POST['modop'] === 'custom' && isset($_POST['a']) && $_POST['a'] === 'RebuildOS') {
-        $newImage = $_POST['new_image'] ?? '';
-        
-        // Log all POST data for debugging
-        logActivity("Hetzner Cloud - RebuildOS: POST data received: " . json_encode($_POST));
-        logActivity("Hetzner Cloud - RebuildOS: New image selected: '{$newImage}'");
-        logActivity("Hetzner Cloud - RebuildOS: Service ID: " . $params['serviceid']);
-        logActivity("Hetzner Cloud - RebuildOS: Server ID: " . ($params['customfields']['serverID'] ?? 'NOT_FOUND'));
-        
-        if (empty($newImage)) {
-            logActivity("Hetzner Cloud - RebuildOS: No new image selected for service ID: " . $params['serviceid']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&error=no_image');
+    // Handle server rebuild.
+    if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'RebuildOS') {
+        $newImage = trim((string) ($_POST['new_image'] ?? ''));
+
+        if ($newImage === '') {
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=no_image');
             exit;
         }
-        
+
+        if (!preg_match('/^[A-Za-z0-9._-]{1,128}$/', $newImage)) {
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=rebuild_failed');
+            exit;
+        }
+
         $result = hetznercloud_RebuildServer($params, $newImage);
-        
         if ($result['success']) {
-            logActivity("Hetzner Cloud - RebuildOS: Success for service ID: " . $params['serviceid']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&success=rebuild_initiated');
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=rebuild_initiated');
         } else {
-            logActivity("Hetzner Cloud - RebuildOS: Failed for service ID: " . $params['serviceid'] . ". Error: " . $result['message']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&error=rebuild_failed&message=' . urlencode($result['message']));
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=rebuild_failed');
         }
         exit;
     }
 
-    // Handle ISO unmount
-    if (isset($_POST['modop']) && $_POST['modop'] === 'custom' && isset($_POST['a']) && $_POST['a'] === 'UnmountISO') {
-        // Log all POST data for debugging
-        logActivity("Hetzner Cloud - UnmountISO: POST data received: " . json_encode($_POST));
-        logActivity("Hetzner Cloud - UnmountISO: Service ID: " . $params['serviceid']);
-        logActivity("Hetzner Cloud - UnmountISO: Server ID: " . ($params['customfields']['serverID'] ?? 'NOT_FOUND'));
-        
+    // Handle ISO unmount.
+    if (isset($_POST['modop'], $_POST['a']) && $_POST['modop'] === 'custom' && $_POST['a'] === 'UnmountISO') {
         $result = hetznercloud_UnmountISO($params);
-        
+
         if ($result['success']) {
-            logActivity("Hetzner Cloud - UnmountISO: Success for service ID: " . $params['serviceid']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&success=iso_unmounted');
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&success=iso_unmounted');
         } else {
-            logActivity("Hetzner Cloud - UnmountISO: Failed for service ID: " . $params['serviceid'] . ". Error: " . $result['message']);
-            header('Location: clientarea.php?action=productdetails&id=' . $params['serviceid'] . '&error=unmount_failed&message=' . urlencode($result['message']));
+            header('Location: clientarea.php?action=productdetails&id=' . $serviceId . '&error=unmount_failed');
         }
         exit;
     }
 
-    // Fetch required data
     try {
-        logActivity("Hetzner Cloud - Fetching server data for service ID: " . $params['serviceid']);
-        
         $statusInfo = hetznercloud_GetServerStatus($params);
         $serverInfo = hetznercloud_GetServerDetails($params);
-        $consoleLinkData = hetznercloud_GetConsoleLink($params);
         $availableImages = hetznercloud_GetAvailableImages($params);
         $attachedISO = hetznercloud_GetAttachedISO($params);
 
+        // Create console authorization grant without putting console credentials in the URL.
+        $consoleLinkData = [
+            'link' => '',
+            'text' => 'Web Console (Unavailable)',
+            'error' => '',
+        ];
+
+        $serverID = $params['customfields']['serverID'] ?? null;
+        if ($serverID) {
+            $consoleResponse = hetznercloud_API_Request('POST', 'request_console', $params, $serverID);
+            $consoleData = $consoleResponse['data'] ?? null;
+
+            if ($consoleResponse['success'] && is_array($consoleData)) {
+                $grantToken = hetznercloud_CreateConsoleGrant($params, $consoleData);
+                if ($grantToken) {
+                    $consoleLinkData = [
+                        'link' => '../modules/servers/hetznercloud/console.php?token=' . rawurlencode($grantToken),
+                        'text' => 'Web Console',
+                        'error' => '',
+                    ];
+                }
+            }
+        }
+
         if (isset($serverInfo['error'])) {
-            logActivity("Hetzner Cloud - Error fetching server details: " . $serverInfo['error']);
             $name = 'Unknown';
             $ip = 'Unknown';
             $image = 'Unknown';
@@ -184,41 +192,40 @@ function hetznercloud_ClientAreaOutput($params)
             $ip = $serverInfo['public_net']['ipv4']['ip'] ?? 'Unknown';
             $image = $serverInfo['image']['description'] ?? 'Unknown';
         }
-
-        logActivity("Hetzner Cloud - Server data retrieved successfully. Name: {$name}, IP: {$ip}, Image: {$image}");
-        
-    } catch (Exception $e) {
-        logActivity("Hetzner Cloud - Exception in client area: " . $e->getMessage());
+    } catch (Throwable $e) {
+        logActivity("Hetzner Cloud - Client Area error for service ID: " . $serviceId);
         $statusInfo = ['status' => 'unknown', 'color' => 'gray', 'message' => 'Error loading data'];
         $name = 'Error';
         $ip = 'Error';
         $image = 'Error';
         $consoleLinkData = ['link' => '', 'text' => 'Console Unavailable', 'error' => 'Error loading data'];
         $availableImages = [];
+        $attachedISO = ['success' => true, 'iso' => null];
     }
 
     return [
         'templatefile' => 'clientarea',
         'vars' => [
-            'serviceid'     => $params['serviceid'],
-            'serverID'      => $params['customfields']['serverID'] ?? null,
-            'serverName'    => $name,
-            'ip'            => $ip,
-            'image'         => $image,
-            'serverStatus'  => $statusInfo['status'] ?? 'Unknown',
-            'statusColor'   => $statusInfo['color'] ?? 'grey',
+            'serviceid' => $serviceId,
+            'serverID' => $params['customfields']['serverID'] ?? null,
+            'serverName' => $name,
+            'ip' => $ip,
+            'image' => $image,
+            'serverStatus' => $statusInfo['status'] ?? 'Unknown',
+            'statusColor' => $statusInfo['color'] ?? 'grey',
             'statusMessage' => $statusInfo['message'] ?? 'No status available',
-            'consoleLink'   => $consoleLinkData['link'] ?? '',
-            'consoleText'   => $consoleLinkData['text'] ?? 'Web Console (Unavailable)',
-            'consoleError'  => $consoleLinkData['error'] ?? '',
+            'consoleLink' => $consoleLinkData['link'] ?? '',
+            'consoleText' => $consoleLinkData['text'] ?? 'Web Console (Unavailable)',
+            'consoleError' => $consoleLinkData['error'] ?? '',
             'availableImages' => $availableImages,
-            'attachedISO'   => $attachedISO['success'] ? $attachedISO['iso'] : null,
-            'username'      => $params['username'] ?? 'root',
-            'password'      => $params['password'] ?? 'Click to set password',
-            'error'         => $_GET['error'] ?? null,
-            'success'       => $_GET['success'] ?? null,
-            'message'       => $_GET['message'] ?? null,
-            'version'       => HETZNERCLOUD_VERSION,
+            'attachedISO' => !empty($attachedISO['success']) ? ($attachedISO['iso'] ?? null) : null,
+            'username' => $params['username'] ?? 'root',
+            'password' => $params['password'] ?? 'Click to set password',
+            'error' => isset($_GET['error']) ? preg_replace('/[^a-z_]/', '', (string) $_GET['error']) : null,
+            'success' => isset($_GET['success']) ? preg_replace('/[^a-z_]/', '', (string) $_GET['success']) : null,
+            'message' => null,
+            'csrfToken' => $csrfToken,
+            'version' => HETZNERCLOUD_VERSION,
         ],
     ];
 }

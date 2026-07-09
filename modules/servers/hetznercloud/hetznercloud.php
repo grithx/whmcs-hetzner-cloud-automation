@@ -6,7 +6,37 @@ if (!defined("WHMCS")) {
 
 require_once __DIR__ . '/version.php';
 require_once __DIR__ . '/api.php';
+require_once __DIR__ . '/security.php';
 require_once __DIR__ . '/functions.php';
+
+/**
+ * Protect state-changing client-area module actions.
+ * Admin-side module execution is not affected because there is no client uid session.
+ */
+if (
+    ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST'
+    && isset($_POST['modop'], $_POST['a'])
+    && $_POST['modop'] === 'custom'
+    && hetznercloud_GetAuthenticatedClientId() > 0
+) {
+    $protectedActions = [
+        'PowerOn',
+        'PowerOff',
+        'Reboot',
+        'RebuildOS',
+        'ResetPassword',
+        'AttachISO',
+        'UnmountISO',
+    ];
+
+    if (in_array((string) $_POST['a'], $protectedActions, true)) {
+        $csrfToken = $_POST['hetznercloud_csrf_token'] ?? '';
+        if (!hetznercloud_ValidateCsrfToken($csrfToken)) {
+            http_response_code(403);
+            exit('Invalid request token');
+        }
+    }
+}
 
 /**
  * Module Meta Data
@@ -50,8 +80,6 @@ function hetznercloud_ConfigOptions($params)
         ],
     ];
 }
-
-
 
 /**
  * Client Area Custom Buttons
